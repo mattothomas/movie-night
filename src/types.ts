@@ -1,0 +1,47 @@
+export type Reaction = 'unseen' | 'seen_loved' | 'seen_liked' | 'seen_okay' | 'seen_bad';
+export type Member = { id: number; username: string };
+export type Movie = {
+  id: string;
+  title: string;
+  year: number;
+  genres: string[];
+  runtime: number;
+  source: string;
+  catalogIndex: number;
+  reaction: Reaction;
+  reviewed: boolean;
+  queued: boolean;
+  priority: boolean;
+  seenBy: number[];
+  queuedBy: { id: number; priority: boolean }[];
+  eligible: boolean;
+  score: number;
+};
+export type Rating = {
+  night_id: number;
+  user_id: number;
+  score: number;
+  comparison_id: number | null;
+  comparison: string | null;
+};
+export type Night = {
+  id: number;
+  date: string;
+  status: 'planning' | 'watching' | 'completed';
+  attendees: number[];
+  winner_id: number | null;
+  movie_id: string | null;
+  mode: 'equal' | 'performance';
+  ratings: Rating[];
+  draw: Weight[] | null;
+};
+export type Weight = Member & { weight: number; chance: number };
+export type State = {
+  user: Member;
+  group: { id: number; name: string; invite: string; demo: number };
+  members: Member[];
+  movies: Movie[];
+  night: Night;
+  nights: Night[];
+  weights: Weight[];
+};
