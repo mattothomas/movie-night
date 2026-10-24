@@ -26,6 +26,7 @@ export function createApp(
   options: {
     authMode?: 'friends' | 'accounts';
     catalog?: { token?: string; request?: typeof fetch };
+    imageRequest?: typeof fetch;
   } = {}
 ) {
   const authMode =
@@ -469,6 +470,59 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
       res.json({ posterPath: movie?.posterPath || null });
     } catch (e) {
       res.status(503).json({ error: (e as Error).message });
+    }
+  });
+  const posterImages = new Map<string, { bytes: Buffer; type: string; expires: number }>();
+  const pendingImages = new Map<
+    string,
+    Promise<{ bytes: Buffer; type: string; expires: number }>
+  >();
+  app.get('/api/catalog/image/:id', async (req, res) => {
+    const row = get(
+      'SELECT d.details FROM movie_metadata d JOIN movies m ON m.group_id=d.group_id AND m.id=d.movie_id WHERE d.group_id=? AND d.movie_id=?',
+      res.locals.user.group_id,
+      String(req.params.id)
+    );
+    const path = row ? JSON.parse(row.details).posterPath : null;
+    if (typeof path !== 'string' || !/^\/[a-zA-Z0-9_.-]+$/.test(path))
+      return res.status(404).json({ error: 'Poster not available.' });
+    try {
+      let image = posterImages.get(path);
+      if (!image || image.expires < Date.now()) {
+        let pending = pendingImages.get(path);
+        if (!pending) {
+          pending = (async () => {
+            // Fixed official host; no caller-supplied URLs or credentials are forwarded.
+            const response = await (options.imageRequest || fetch)(
+              `https://image.tmdb.org/t/p/w500${path}`,
+              { signal: AbortSignal.timeout(15000), redirect: 'error' }
+            );
+            const type = response.headers.get('content-type')?.split(';')[0] || '';
+            if (
+              !response.ok ||
+              !['image/jpeg', 'image/png', 'image/webp'].includes(type) ||
+              Number(response.headers.get('content-length') || 0) > 5_000_000
+            )
+              throw new Error('Poster download failed.');
+            const bytes = Buffer.from(await response.arrayBuffer());
+            if (bytes.length > 5_000_000) throw new Error('Poster exceeds size limit.');
+            const value = { bytes, type, expires: Date.now() + 86400000 };
+            posterImages.set(path, value);
+            while (
+              posterImages.size > 100 ||
+              [...posterImages.values()].reduce((n, m) => n + m.bytes.length, 0) > 20_000_000
+            )
+              posterImages.delete(posterImages.keys().next().value!);
+            return value;
+          })().finally(() => pendingImages.delete(path));
+          pendingImages.set(path, pending);
+        }
+        image = await pending;
+      }
+      res.setHeader('Cache-Control', 'private, max-age=86400');
+      res.type(image.type).send(image.bytes);
+    } catch {
+      res.status(502).json({ error: 'Poster could not be loaded. Try again shortly.' });
     }
   });
   app.post('/api/review/start', async (req, res) => {

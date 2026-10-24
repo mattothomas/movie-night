@@ -126,7 +126,7 @@ function Poster({ movie, large = false }: { movie: Movie; large?: boolean }) {
     <div ref={ref} className={`poster official-poster ${large ? 'large' : ''}`}>
       {path && !failed ? (
         <img
-          src={`https://image.tmdb.org/t/p/w500${path}`}
+          src={`/api/catalog/image/${encodeURIComponent(movie.id)}`}
           alt={`${movie.title} official poster`}
           loading="lazy"
           onError={() => setFailed(true)}

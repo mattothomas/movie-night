@@ -4,9 +4,10 @@ import type { AddressInfo } from 'node:net';
 import { createApp } from '../server/app.js';
 import { rankMovies, diverseDeck, type TasteMovie } from '../server/recommender.js';
 
-async function fixture(request?: typeof fetch) {
+async function fixture(request?: typeof fetch, imageRequest?: typeof fetch) {
   const { app, db } = createApp(':memory:', {
     authMode: 'friends',
+    imageRequest,
     catalog: { token: request ? 'test-token' : '', request },
   });
   const server = app.listen(0, '127.0.0.1');
@@ -22,7 +23,12 @@ async function fixture(request?: typeof fetch) {
       });
       const c = r.headers.get('set-cookie');
       if (c) cookie = c.split(';')[0];
-      return { status: r.status, data: await r.json() };
+      return {
+        status: r.status,
+        data: r.headers.get('content-type')?.startsWith('image/')
+          ? { bytes: (await r.arrayBuffer()).byteLength, type: r.headers.get('content-type') }
+          : await r.json(),
+      };
     };
   }
   const chris = client(),
@@ -298,6 +304,36 @@ test('TMDB catalog supplies official posters, filters non-English titles, and pe
     assert.equal(s.movies.filter((m: any) => m.id === 'tt5052448').length, 1);
     assert.equal(s.movies.find((m: any) => m.id === 'tt5052448').reaction, 'seen_loved');
     assert.equal(s.catalog.error, null);
+  } finally {
+    await f.close();
+  }
+});
+
+test('poster delivery uses a fixed TMDB host, requires a session, caches bytes, and never forwards the token', async () => {
+  let calls = 0;
+  const imageRequest = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    calls++;
+    assert.equal(new URL(String(input)).host, 'image.tmdb.org');
+    assert.equal(init?.headers, undefined);
+    return new Response(new Uint8Array([255, 216, 255, 217]), {
+      headers: { 'Content-Type': 'image/jpeg' },
+    });
+  }) as typeof fetch;
+  const f = await fixture(undefined, imageRequest);
+  try {
+    assert.equal((await f.chris('/catalog/image/tt0111161')).status, 401);
+    await f.chris('/auth/friend', { name: 'Chris', pin: '449' });
+    const state = (await f.chris('/state')).data;
+    f.db
+      .prepare('INSERT INTO movie_metadata VALUES(?,?,?,?)')
+      .run(state.group.id, 'tt0111161', 278, JSON.stringify({ posterPath: '/shawshank.jpg' }));
+    const result = await f.chris('/catalog/image/tt0111161');
+    assert.equal(result.status, 200);
+    assert.equal(result.data.type, 'image/jpeg');
+    assert.equal(result.data.bytes, 4);
+    assert.equal((await f.chris('/catalog/image/tt0111161')).status, 200);
+    assert.equal(calls, 1);
+    assert.equal((await f.chris('/catalog/image/not-in-the-group')).status, 404);
   } finally {
     await f.close();
   }
