@@ -2,6 +2,8 @@
 
 A private Friday ritual for Chris, Matthew, and Yash: discover films nobody has seen, learn each person’s taste, and let the wheel choose who gets the final pick.
 
+For a shared URL and your MLH domain, follow [DEPLOY.md](DEPLOY.md). The repo includes a Render Blueprint with a persistent disk. Hosting has not been created automatically.
+
 ## Start the app
 
 Requires **Node.js 24.5 or newer**. Your group’s history lives in SQLite; no external user database is required.
@@ -13,6 +15,8 @@ npm run dev
 ```
 
 The combined frontend/API server listens on port 3000 (`PORT` overrides it). Choose **I am Chris**, **I am Matthew**, or **I am Yash**, then enter the agreed three-digit club code. All three profiles share one club while maintaining independent movie histories, taste profiles, and watchlists. The requested shared code is the server default; `FRIEND_GROUP_PIN` overrides it. It is not sent to the browser in configuration or stored in client-side code. Sessions persist through restarts in the retained database.
+
+Matthew can enter `650` for the admin board or `032` for an isolated test group. Host controls include past-night editing, a one-shot next-picker override, and resetting unfinished picks with a backup. See [DEPLOY.md](DEPLOY.md) for the rating flow, default code overrides, deployment, and DNS steps.
 
 The previous username/password, registration, invitation, and demo systems remain in the code. They are disabled on both the server and login screen by default. Set `AUTH_MODE=accounts` to restore them. Existing account data is preserved; friend mode creates a separate club and does not silently transfer existing people’s histories into the named profiles.
 
@@ -26,6 +30,8 @@ This version integrates **The Movie Database (TMDB)** for movie metadata, offici
 4. Permit `api.themoviedb.org` and `image.tmdb.org` in the cloud network settings, save the settings, and restart the app so the server receives the token. Publish the environment when the environment UI requires it to retain the setup.
 5. Open a review batch or use **Find more movies** in the approved list. Group settings also has a catalog refresh button.
 
+Discovery now also fetches recent English-language releases (last year, at least 25 votes), with an automatic check at startup and every 24 hours on an always-running server. This complements the highly rated classic feed; the catalog is fetched on demand, not infinite or preloaded.
+
 The token remains on the server; only public poster paths reach the browser. The start commands honor the environment’s HTTPS proxy. The server downloads official poster images from the fixed `image.tmdb.org` host with TLS verification intact and serves them through authenticated same-origin image endpoints with a bounded cache. The TMDB bearer token is never forwarded to the image CDN. This also avoids requiring the browser to trust the cloud’s outbound image proxy certificate. The app never substitutes generated title-card artwork for official posters: missing posters use a clearly labeled neutral placeholder.
 
 **Live validation:** the saved cloud secret now authenticates successfully with TMDB. The app’s live search found _Get Out_ (2017), its poster endpoint delivered a JPEG successfully, live discovery expanded an isolated test catalog beyond the starter library, and the official 500×750 poster rendered successfully in a phone-sized browser through the app’s image endpoint. Controlled provider-response tests also cover language filtering, caching, and personalized candidate retrieval. Without a configured token on another machine, that machine can still use its saved starter library but cannot fetch new posters or expand discovery.
@@ -38,7 +44,7 @@ This product uses the TMDB API but is not endorsed or certified by TMDB.
 2. **Friday 20:** a saved, personalized batch of 20 fresh cards. It draws from movies not reviewed by that person and not marked seen by anyone attending. Completed batches do not recycle the same cards. Related candidates enter as the catalog refreshes. A checkbox moves an unseen movie to the top of that person’s watchlist.
 3. **Approved list:** the group’s eligible films, ranked for everyone attending. **The earlier rule is preserved: unanswered means unseen.** An eligible movie becomes explicitly confirmed unseen once every attendee answers unseen; the detail view distinguishes confirmation from pending answers. Any attendee’s seen history immediately removes the film. The list is a ranked set of possibilities, not a guarantee everyone will like every entry.
 4. **The wheel:** equal odds or taste-weighted odds select the person, not the movie. Only that picker can set the final movie. The server saves one draw per night. Attendance and wheel mode lock after the spin. The animation has Web Audio clicks that slow down with the spin, plus a remembered mute toggle. Audio unlocks from the user’s tap so it can work on mobile; unavailable audio never blocks choosing a picker.
-5. **Veto, watch, rate:** “Wait, I’ve seen this” saves the film as seen and clears the choice. Starting playback rechecks eligibility. Finishing marks the film seen for all attendees. Each attendee rates it 1–5 and can compare it with a previous Friday. Their feedback updates their taste profile for subsequent rankings.
+5. **Veto, watch, rate:** “Wait, I’ve seen this” saves the film as seen and clears the choice. Starting playback rechecks eligibility. Finishing marks the film seen for all attendees. Each attendee rates it 1–5 and can compare it with a previous Friday. The finisher gets the dialog immediately; other attendees see a persistent Rate our movie reminder on the main screens. Their feedback updates their taste profile for subsequent rankings.
 
 The wheel’s performance mode starts at 100 weight units per person and adjusts by 25 units for every point their past picks’ average rating is above or below 3/5. Weights are normalized to probabilities. New pickers start neutral.
 

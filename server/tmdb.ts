@@ -111,6 +111,20 @@ export class TmdbCatalog {
   async search(query: string, page = 1) {
     return this.json('/search/movie', { query, page: String(page), include_adult: 'false' });
   }
+  async recentReleases(page = 1) {
+    const today = new Date(),
+      start = new Date(today);
+    start.setUTCFullYear(start.getUTCFullYear() - 1);
+    return this.json('/discover/movie', {
+      with_original_language: 'en',
+      include_adult: 'false',
+      sort_by: 'primary_release_date.desc',
+      'primary_release_date.gte': start.toISOString().slice(0, 10),
+      'primary_release_date.lte': today.toISOString().slice(0, 10),
+      'vote_count.gte': '25',
+      page: String(page),
+    });
+  }
   async expand(ids: number[], limit = 20) {
     const unique = [...new Set(ids)].slice(0, limit);
     const movies: CatalogMovie[] = [];

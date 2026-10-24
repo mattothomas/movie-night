@@ -17,7 +17,20 @@ export class CatalogService {
       provider: 'TMDB',
       lastSync: s?.updated_at || null,
       error: s?.last_error || null,
+      newReleaseFeed: true,
     };
+  }
+  async refreshDue() {
+    if (!this.provider.configured) return;
+    for (const row of this.db.prepare('SELECT id FROM groups WHERE demo!=1').all() as any[]) {
+      try {
+        await this.refresh(row.id);
+      } catch {
+        console.error(
+          `Movie catalog refresh failed for group ${row.id}; existing movies remain available.`
+        );
+      }
+    }
   }
   store(groupId: number, m: CatalogMovie) {
     const existing = this.db
@@ -126,6 +139,15 @@ export class CatalogService {
         this.store(groupId, m);
         added++;
       }
+    }
+    // A separate release-date feed catches new titles that cannot yet reach 1,000 votes.
+    const recent = await this.provider.recentReleases();
+    const recentIds = (recent.results || [])
+      .filter((m: any) => m.original_language === 'en' && !m.adult)
+      .map((m: any) => m.id);
+    for (const movie of await this.provider.expand(recentIds, 10)) {
+      this.store(groupId, movie);
+      added++;
     }
     // Enrich unhydrated starter/history titles, including dislikes, for richer negative feedback.
     const hydrate = this.db

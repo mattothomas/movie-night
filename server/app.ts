@@ -7,8 +7,15 @@ import { starterMovies, type Movie } from './catalog.js';
 import { TmdbCatalog, CatalogError } from './tmdb.js';
 import { CatalogService } from './catalog-service.js';
 import { rankMovies, diverseDeck } from './recommender.js';
+import { mountAdmin } from './admin.js';
 
-type User = { id: number; username: string; group_id: number; password: string };
+type User = {
+  id: number;
+  username: string;
+  group_id: number;
+  password: string;
+  role: 'member' | 'admin' | 'tester';
+};
 type Night = {
   id: number;
   group_id: number;
@@ -47,6 +54,10 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
   db.exec(
     'CREATE TABLE IF NOT EXISTS review_answers(batch_id INTEGER,movie_id TEXT,PRIMARY KEY(batch_id,movie_id))'
   );
+  db.exec(`CREATE TABLE IF NOT EXISTS session_roles(token TEXT PRIMARY KEY REFERENCES sessions(token) ON DELETE CASCADE,role TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS test_profiles(name TEXT PRIMARY KEY,user_id INTEGER REFERENCES users(id),group_id INTEGER REFERENCES groups(id));
+CREATE TABLE IF NOT EXISTS wheel_overrides(group_id INTEGER PRIMARY KEY,enabled INTEGER,winner_id INTEGER);
+CREATE TABLE IF NOT EXISTS night_selection(night_id INTEGER PRIMARY KEY REFERENCES nights(id) ON DELETE CASCADE,method TEXT NOT NULL);`);
   const catalog = new CatalogService(
     db,
     new TmdbCatalog(db, options.catalog?.token, options.catalog?.request)
@@ -95,17 +106,19 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
       ?.slice(11);
     if (!token) return;
     const u = get(
-      'SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=? AND s.expires>?',
+      "SELECT u.*,COALESCE(r.role,'member') AS role FROM users u JOIN sessions s ON s.user_id=u.id LEFT JOIN session_roles r ON r.token=s.token WHERE s.token=? AND s.expires>?",
       createHash('sha256').update(token).digest('hex'),
       Date.now()
     );
     if (u) {
-      const friend = !!get('SELECT name FROM friend_profiles WHERE user_id=?', u.id);
+      const friend =
+        !!get('SELECT name FROM friend_profiles WHERE user_id=?', u.id) ||
+        !!get('SELECT name FROM test_profiles WHERE user_id=?', u.id);
       if ((authMode === 'friends') !== friend) return;
     }
     return u;
   }
-  function setSession(res: Response, userId: number) {
+  function setSession(res: Response, userId: number, role = 'member') {
     const token = randomBytes(32).toString('hex');
     run('DELETE FROM sessions WHERE expires < ?', Date.now());
     run(
@@ -113,6 +126,11 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
       createHash('sha256').update(token).digest('hex'),
       userId,
       Date.now() + 1000 * 60 * 60 * 24 * 14
+    );
+    run(
+      'INSERT INTO session_roles VALUES(?,?)',
+      createHash('sha256').update(token).digest('hex'),
+      role
     );
     res.cookie('mn_session', token, {
       httpOnly: true,
@@ -232,8 +250,10 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
       user: user
         ? {
             id: user.id,
+            role: user.role,
             username:
               get('SELECT name FROM friend_profiles WHERE user_id=?', user.id)?.name ||
+              get('SELECT name FROM test_profiles WHERE user_id=?', user.id)?.name ||
               user.username,
           }
         : null,
@@ -245,13 +265,49 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
     const name = ['Chris', 'Matthew', 'Yash'].find((n) => n === req.body.name);
     const pin = typeof req.body.pin === 'string' ? req.body.pin : '';
     const expected = process.env.FRIEND_GROUP_PIN || '449';
-    if (
-      !name ||
-      !timingSafeEqual(
+    const matches = (value: string) =>
+      timingSafeEqual(
         createHash('sha256').update(pin).digest(),
-        createHash('sha256').update(expected).digest()
-      )
-    )
+        createHash('sha256').update(value).digest()
+      );
+    const isAdmin = name === 'Matthew' && matches(process.env.FRIEND_ADMIN_PIN || '650');
+    const isTest = name === 'Matthew' && matches(process.env.FRIEND_TEST_PIN || '032');
+    if (isTest) {
+      let profile = get("SELECT * FROM test_profiles WHERE name='Test Matthew'");
+      if (!profile) {
+        db.exec('BEGIN');
+        try {
+          const groupId = Number(
+            run(
+              'INSERT INTO groups(name,invite,demo) VALUES(?,?,2)',
+              'The Test Screening Room',
+              randomBytes(5).toString('hex').toUpperCase()
+            ).lastInsertRowid
+          );
+          seed(groupId);
+          for (const member of ['Test Chris', 'Test Matthew', 'Test Yash']) {
+            const id = Number(
+              run(
+                'INSERT INTO users(username,password,group_id) VALUES(?,?,?)',
+                member.replace(' ', '_') + '_' + randomBytes(4).toString('hex'),
+                passwordHash(randomBytes(32).toString('hex')),
+                groupId
+              ).lastInsertRowid
+            );
+            run('INSERT INTO test_profiles VALUES(?,?,?)', member, id, groupId);
+          }
+          db.exec('COMMIT');
+          profile = get("SELECT * FROM test_profiles WHERE name='Test Matthew'");
+        } catch (e) {
+          db.exec('ROLLBACK');
+          throw e;
+        }
+      }
+      setSession(res, profile.user_id, 'tester');
+      return res.json({ ok: true, role: 'tester' });
+    }
+
+    if (!name || (!isAdmin && !matches(expected)))
       return res.status(401).json({ error: 'That code isn’t correct. Try again.' });
     let profile = get('SELECT * FROM friend_profiles WHERE name=?', name);
     if (!profile) {
@@ -292,8 +348,8 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
         throw e;
       }
     }
-    setSession(res, profile.user_id);
-    res.json({ ok: true });
+    setSession(res, profile.user_id, isAdmin ? 'admin' : 'member');
+    res.json({ ok: true, role: isAdmin ? 'admin' : 'member' });
   });
   app.post('/api/auth/register', (req, res) => {
     const { username, password, invite, groupName } = req.body;
@@ -599,7 +655,7 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
     const u: User = res.locals.user;
     const group = get('SELECT * FROM groups WHERE id=?', u.group_id);
     const members = all(
-      'SELECT u.id,COALESCE(f.name,u.username) AS username FROM users u LEFT JOIN friend_profiles f ON f.user_id=u.id WHERE u.group_id=? ORDER BY u.id',
+      'SELECT u.id,COALESCE(f.name,t.name,u.username) AS username FROM users u LEFT JOIN friend_profiles f ON f.user_id=u.id LEFT JOIN test_profiles t ON t.user_id=u.id WHERE u.group_id=? ORDER BY u.id',
       u.group_id
     ).map((m) => ({ ...m, username: group.demo ? m.username.split('_')[0] : m.username }));
     const n = currentNight(u.group_id);
@@ -661,6 +717,8 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
       ...night,
       attendees: JSON.parse(night.attendees),
       draw: night.draw ? JSON.parse(night.draw) : null,
+      selectionMethod:
+        get('SELECT method FROM night_selection WHERE night_id=?', night.id)?.method || 'random',
       ratings: all('SELECT * FROM ratings WHERE night_id=?', night.id),
     }));
     res.json({
@@ -677,7 +735,7 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
           ),
         })),
       },
-      user: { id: u.id, username: members.find((m) => m.id === u.id)?.username },
+      user: { id: u.id, username: members.find((m) => m.id === u.id)?.username, role: u.role },
       group,
       members,
       movies: scored,
@@ -765,6 +823,15 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
     const entries = weights(u.group_id, n, n.mode);
     const total = entries.reduce((s, e) => s + e.weight, 0);
     if (!total) return res.status(400).json({ error: 'Add an attendee first.' });
+    const override = get(
+      'SELECT * FROM wheel_overrides WHERE group_id=? AND enabled=1',
+      u.group_id
+    );
+    if (override && !entries.some((e) => e.id === override.winner_id))
+      return res.status(409).json({
+        error:
+          'The host-selected picker is not attending. Update the host selection or attendance.',
+      });
     let ticket = randomInt(total);
     let winner = entries[entries.length - 1];
     for (const entry of entries) {
@@ -774,12 +841,22 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
       }
       ticket -= entry.weight;
     }
-    run(
-      'UPDATE nights SET winner_id=?,draw=? WHERE id=? AND winner_id IS NULL',
-      winner.id,
-      JSON.stringify(entries),
-      n.id
-    );
+    if (override) winner = entries.find((e) => e.id === override.winner_id)!;
+    db.exec('BEGIN');
+    try {
+      run(
+        'UPDATE nights SET winner_id=?,draw=? WHERE id=? AND winner_id IS NULL',
+        winner.id,
+        JSON.stringify(entries),
+        n.id
+      );
+      run('INSERT INTO night_selection VALUES(?,?)', n.id, override ? 'host' : 'random');
+      if (override) run('UPDATE wheel_overrides SET enabled=0 WHERE group_id=?', u.group_id);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
     res.json({ winnerId: winner.id });
   });
   app.post('/api/night/pick', (req, res) => {
@@ -865,9 +942,11 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
       return res.status(400).json({ error: 'Choose a rating from 1 to 5.' });
     if (comparisonId) {
       const previous = get(
-        "SELECT id FROM nights WHERE id=? AND group_id=? AND status='completed' AND id<?",
+        "SELECT id FROM nights WHERE id=? AND group_id=? AND status='completed' AND (date<? OR (date=? AND id<?))",
         comparisonId,
         u.group_id,
+        n.date,
+        n.date,
         n.id
       );
       if (!previous || !['better', 'same', 'worse'].includes(comparison))
@@ -942,6 +1021,11 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
     }
     res.json({ ok: true, count: movies.length });
   });
+  mountAdmin(app, db, dbPath, catalog, setSession);
+  app.get('/healthz', (_req, res) => {
+    db.prepare('SELECT 1').get();
+    res.json({ ok: true });
+  });
   app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found.' }));
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     console.error(err.message);
@@ -952,5 +1036,5 @@ CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER
           : 'Something went wrong. Please try again.',
     });
   });
-  return { app, db };
+  return { app, db, refreshCatalogs: () => catalog.refreshDue() };
 }

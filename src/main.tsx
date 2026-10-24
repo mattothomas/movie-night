@@ -55,6 +55,7 @@ import '@fontsource/manrope/latin-700.css';
 import '@fontsource/manrope/latin-800.css';
 import './styles.css';
 import { FriendLogin } from './FriendLogin';
+import { AdminPanel } from './AdminPanel';
 import { WheelAudio } from './wheel-audio';
 import { officialPoster } from './posters';
 const CatalogContext = createContext(false);
@@ -155,9 +156,18 @@ function App() {
     [settings, setSettings] = useState(false);
   const mounted = useRef(true);
   const promptedProfile = useRef<number | null>(null);
+  const adminRouted = useRef(false);
+  useEffect(() => {
+    if (state?.user.role === 'admin' && !adminRouted.current) {
+      adminRouted.current = true;
+      setPage('admin');
+    }
+    if (state?.user.role !== 'admin') adminRouted.current = false;
+  }, [state?.user.id, state?.user.role]);
   useEffect(() => {
     if (
       state?.authMode === 'friends' &&
+      state.user.role === 'member' &&
       state.onboarding.reviewed < 50 &&
       promptedProfile.current !== state.user.id
     ) {
@@ -277,6 +287,15 @@ function App() {
     { id: 'queues', label: 'Our watchlists', icon: Bookmark },
     { id: 'history', label: 'Past Fridays', icon: Clapperboard },
   ];
+  if (['admin', 'tester'].includes(s.user.role))
+    nav.push({
+      id: 'admin',
+      label: s.user.role === 'tester' ? 'Test controls' : 'Admin board',
+      icon: Settings,
+    });
+  const pendingRating = completed.find(
+    (n) => n.attendees.includes(s.user.id) && !n.ratings.some((r) => r.user_id === s.user.id)
+  );
   return (
     <CatalogContext.Provider value={s.catalog.configured}>
       <div className="app-shell">
@@ -351,7 +370,11 @@ function App() {
               <b>{nav.find((n) => n.id === page)?.label}</b>
             </span>
             <div className="topbar-right">
-              {!!s.group.demo && <span className="demo-label">DEMO CLUB</span>}
+              {!!s.group.demo && (
+                <span className="demo-label">
+                  {s.user.role === 'tester' ? 'TEST GROUP' : 'DEMO CLUB'}
+                </span>
+              )}
               <span className="live-pill">
                 <i /> Friday people
               </span>
@@ -367,7 +390,34 @@ function App() {
             </div>
           </header>
           <main>
-            {s.onboarding.reviewed < 50 && (
+            {s.user.role === 'tester' && (
+              <div className="sandbox-banner">
+                <b>TEST GROUP</b>
+                <span>
+                  You’re in an isolated screening room. Your real group’s picks and taste won’t
+                  change.
+                </span>
+                <button className="text-button" onClick={() => setPage('admin')}>
+                  Test controls
+                </button>
+              </div>
+            )}
+            {pendingRating && (
+              <div className="pending-rating global-rating">
+                <Star size={18} />
+                <span>
+                  How was {s.movies.find((m) => m.id === pendingRating.movie_id)?.title}? Your
+                  Friday rating is waiting.
+                </span>
+                <button className="button lime" onClick={() => setRate(pendingRating)}>
+                  Rate our movie
+                </button>
+              </div>
+            )}
+            {page === 'admin' && ['admin', 'tester'].includes(s.user.role) && (
+              <AdminPanel s={s} action={action} />
+            )}
+            {s.onboarding.reviewed < 50 && page !== 'admin' && (
               <div className="onboarding-banner">
                 <Sparkles size={20} />
                 <div>
@@ -1423,7 +1473,9 @@ function Tonight({
               'A little suspense…'
             ) : winner && reveal ? (
               <>
-                <span className="eyebrow">THE PICK IS YOURS</span>
+                <span className="eyebrow">
+                  {n.selectionMethod === 'host' ? 'HOST-SELECTED PICKER' : 'THE PICK IS YOURS'}
+                </span>
                 <h3>
                   {winner.username}
                   <span>✳</span>
@@ -1450,18 +1502,20 @@ function Tonight({
               ? 'Everyone attending gets an equal chance.'
               : 'Past picks adjust your chances: each point above or below 3/5 changes your weight by 25%. New pickers start neutral.'}
           </p>
-          <div className="odds-row">
-            {s.weights.map((w, i) => (
-              <span key={w.id}>
-                <i
-                  style={{
-                    background: colors[s.members.findIndex((m) => m.id === w.id) % colors.length],
-                  }}
-                />
-                {s.members.find((m) => m.id === w.id)?.username} <b>{w.chance.toFixed(1)}%</b>
-              </span>
-            ))}
-          </div>
+          {n.selectionMethod !== 'host' && (
+            <div className="odds-row">
+              {s.weights.map((w, i) => (
+                <span key={w.id}>
+                  <i
+                    style={{
+                      background: colors[s.members.findIndex((m) => m.id === w.id) % colors.length],
+                    }}
+                  />
+                  {s.members.find((m) => m.id === w.id)?.username} <b>{w.chance.toFixed(1)}%</b>
+                </span>
+              ))}
+            </div>
+          )}
         </section>
         <div className="night-details">
           <section className="panel attendance-panel">
@@ -2057,7 +2111,9 @@ function RateModal({
     [comparison, setComparison] = useState(existing?.comparison || 'same'),
     [saving, setSaving] = useState(false);
   const m = s.movies.find((m) => m.id === n.movie_id);
-  const previous = s.nights.filter((p) => p.status === 'completed' && p.id < n.id);
+  const previous = s.nights.filter(
+    (p) => p.status === 'completed' && (p.date < n.date || (p.date === n.date && p.id < n.id))
+  );
   return (
     <Modal title="The credits have rolled" onClose={onClose}>
       <div className="rating-modal">
@@ -2200,8 +2256,9 @@ function SettingsModal({
         <h2>{s.group.name}</h2>
         {s.authMode === 'friends' ? (
           <div className="info-box">
-            Chris, Matthew, and Yash share this club. Each profile has its own taste, movie memory,
-            and watchlist. Use Switch person below to change profiles.
+            {s.user.role === 'tester' ? 'This isolated test group' : 'Chris, Matthew, and Yash'}{' '}
+            share this club. Each profile has its own taste, movie memory, and watchlist. Use Switch
+            person below to change profiles.
           </div>
         ) : s.group.demo ? (
           <div className="info-box">

@@ -8,9 +8,11 @@
     "build": "tsc --noEmit && vite build",
     "start": "NODE_ENV=production node --use-env-proxy --env-file-if-exists=.env --import tsx server/index.ts",
     "test": "tsx --test tests/*.test.ts",
-    "test:browser": "npm run build && COOKIE_SECURE=false NODE_ENV=production tsx tests/browser.smoke.ts && COOKIE_SECURE=false NODE_ENV=production tsx tests/friends.browser.ts",
+    "test:browser": "npm run build && COOKIE_SECURE=false NODE_ENV=production tsx tests/browser.smoke.ts && COOKIE_SECURE=false NODE_ENV=production tsx tests/friends.browser.ts && COOKIE_SECURE=false NODE_ENV=production tsx tests/admin.browser.ts",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "backup": "node --env-file-if-exists=.env --import tsx scripts/backup.ts",
+    "reset:picks": "node --env-file-if-exists=.env --import tsx scripts/reset-picks.ts"
   },
   "engines": {
     "node": ">=24.5.0"
