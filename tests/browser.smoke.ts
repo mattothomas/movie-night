@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import assert from 'node:assert/strict';
 
-const { app, db } = createApp(':memory:');
+const { app, db } = createApp(':memory:', { authMode: 'accounts', catalog: { token: '' } });
 app.use(express.static(path.resolve('dist')));
 app.get('/{*path}', (_req, res) => res.sendFile(path.resolve('dist/index.html')));
 const server = app.listen(0, '127.0.0.1');
@@ -53,7 +53,7 @@ try {
     s.movies.find((m: any) => m.title === 'The Shawshank Redemption').reaction,
     'seen_loved'
   );
-  await page.locator('nav').getByRole('button', { name: 'Discover movies' }).click();
+  await page.locator('nav').getByRole('button', { name: 'Approved list' }).click();
   await page.getByRole('textbox', { name: 'Search movies' }).fill('Arrival');
   await page.getByRole('button', { name: 'Add Arrival to watchlist', exact: true }).click();
   await page.locator('nav').getByRole('button', { name: 'Our watchlists' }).click();
@@ -76,7 +76,7 @@ try {
     await expect(picker.getByRole('heading', { name: 'Friday looks good on you.' })).toBeVisible();
   }
   async function choose(title: string) {
-    await picker.locator('nav').getByRole('button', { name: 'Discover movies' }).click();
+    await picker.locator('nav').getByRole('button', { name: 'Approved list' }).click();
     await picker.getByRole('textbox', { name: 'Search movies' }).fill(title);
     await picker.locator('.movie-title').filter({ hasText: title }).click();
     await picker.getByRole('button', { name: 'This is my Friday pick' }).click();

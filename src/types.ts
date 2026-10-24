@@ -16,6 +16,9 @@ export type Movie = {
   queuedBy: { id: number; priority: boolean }[];
   eligible: boolean;
   score: number;
+  posterPath?: string | null;
+  approved: boolean;
+  confirmedUnseen: boolean;
 };
 export type Rating = {
   night_id: number;
@@ -37,6 +40,9 @@ export type Night = {
 };
 export type Weight = Member & { weight: number; chance: number };
 export type State = {
+  authMode: 'friends' | 'accounts';
+  catalog: { configured: boolean; provider: string; lastSync: number | null; error: string | null };
+  onboarding: { target: number; reviewed: number; members: { id: number; reviewed: number }[] };
   user: Member;
   group: { id: number; name: string; invite: string; demo: number };
   members: Member[];

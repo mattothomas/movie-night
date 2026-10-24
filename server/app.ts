@@ -4,6 +4,9 @@ import { randomBytes, randomInt, scryptSync, timingSafeEqual, createHash } from 
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { starterMovies, type Movie } from './catalog.js';
+import { TmdbCatalog, CatalogError } from './tmdb.js';
+import { CatalogService } from './catalog-service.js';
+import { rankMovies, diverseDeck } from './recommender.js';
 
 type User = { id: number; username: string; group_id: number; password: string };
 type Night = {
@@ -18,7 +21,15 @@ type Night = {
   draw: string | null;
 };
 const reactions = ['unseen', 'seen_loved', 'seen_liked', 'seen_okay', 'seen_bad'];
-export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqlite') {
+export function createApp(
+  dbPath = process.env.DB_PATH || 'data/movie-night.sqlite',
+  options: {
+    authMode?: 'friends' | 'accounts';
+    catalog?: { token?: string; request?: typeof fetch };
+  } = {}
+) {
+  const authMode =
+    options.authMode || (process.env.AUTH_MODE === 'accounts' ? 'accounts' : 'friends');
   if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
@@ -30,6 +41,15 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
     CREATE TABLE IF NOT EXISTS nights(id INTEGER PRIMARY KEY, group_id INTEGER REFERENCES groups(id), date TEXT, status TEXT DEFAULT 'planning', attendees TEXT, winner_id INTEGER REFERENCES users(id), movie_id TEXT, mode TEXT DEFAULT 'equal', draw TEXT);
     CREATE TABLE IF NOT EXISTS ratings(night_id INTEGER REFERENCES nights(id), user_id INTEGER REFERENCES users(id), score INTEGER, comparison_id INTEGER REFERENCES nights(id), comparison TEXT, PRIMARY KEY(night_id,user_id));
   `);
+  db.exec(`CREATE TABLE IF NOT EXISTS friend_profiles(name TEXT PRIMARY KEY,user_id INTEGER REFERENCES users(id),group_id INTEGER REFERENCES groups(id));
+CREATE TABLE IF NOT EXISTS review_batches(id INTEGER PRIMARY KEY,user_id INTEGER,kind TEXT,movie_ids TEXT,created_at INTEGER,completed INTEGER DEFAULT 0);`);
+  db.exec(
+    'CREATE TABLE IF NOT EXISTS review_answers(batch_id INTEGER,movie_id TEXT,PRIMARY KEY(batch_id,movie_id))'
+  );
+  const catalog = new CatalogService(
+    db,
+    new TmdbCatalog(db, options.catalog?.token, options.catalog?.request)
+  );
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
@@ -41,7 +61,7 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
     if (process.env.NODE_ENV === 'production')
       res.setHeader(
         'Content-Security-Policy',
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://image.tmdb.org; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
       );
     if (req.path.startsWith('/api')) res.setHeader('Cache-Control', 'no-store');
     const origin = req.get('origin');
@@ -73,11 +93,16 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
       .find((x) => x.startsWith('mn_session='))
       ?.slice(11);
     if (!token) return;
-    return get(
+    const u = get(
       'SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=? AND s.expires>?',
       createHash('sha256').update(token).digest('hex'),
       Date.now()
     );
+    if (u) {
+      const friend = !!get('SELECT name FROM friend_profiles WHERE user_id=?', u.id);
+      if ((authMode === 'friends') !== friend) return;
+    }
+    return u;
   }
   function setSession(res: Response, userId: number) {
     const token = randomBytes(32).toString('hex');
@@ -104,9 +129,13 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
     res.locals.user = user;
     next();
   }
-  function groupMovies(groupId: number): Movie[] {
-    return all('SELECT * FROM movies WHERE group_id=? ORDER BY rowid', groupId).map((m) => ({
+  function groupMovies(groupId: number): (Movie & import('./recommender.js').TasteMovie)[] {
+    return all(
+      'SELECT m.*,d.details FROM movies m LEFT JOIN movie_metadata d ON d.group_id=m.group_id AND d.movie_id=m.id WHERE m.group_id=? ORDER BY m.rowid',
+      groupId
+    ).map((m) => ({
       ...m,
+      ...(m.details ? JSON.parse(m.details) : {}),
       genres: JSON.parse(m.genres),
     }));
   }
@@ -188,11 +217,82 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
       return res.status(429).json({ error: 'Too many attempts. Try again in 15 minutes.' });
     if (!attempt || attempt.until < now) authAttempts.set(key, { count: 1, until: now + 900000 });
     else attempt.count++;
+    if (authMode === 'friends' && ['/register', '/login', '/demo'].includes(req.path))
+      return res
+        .status(404)
+        .json({ error: 'Account sign-in is disabled. Choose your name instead.' });
     next();
   });
   app.get('/api/auth', (req, res) => {
     const user = session(req);
-    res.json({ user: user ? { id: user.id, username: user.username } : null });
+    res.json({
+      mode: authMode,
+      profiles: authMode === 'friends' ? ['Chris', 'Matthew', 'Yash'] : [],
+      user: user
+        ? {
+            id: user.id,
+            username:
+              get('SELECT name FROM friend_profiles WHERE user_id=?', user.id)?.name ||
+              user.username,
+          }
+        : null,
+    });
+  });
+  app.post('/api/auth/friend', (req, res) => {
+    if (authMode !== 'friends')
+      return res.status(404).json({ error: 'Friend profiles are disabled.' });
+    const name = ['Chris', 'Matthew', 'Yash'].find((n) => n === req.body.name);
+    const pin = typeof req.body.pin === 'string' ? req.body.pin : '';
+    const expected = process.env.FRIEND_GROUP_PIN || '449';
+    if (
+      !name ||
+      !timingSafeEqual(
+        createHash('sha256').update(pin).digest(),
+        createHash('sha256').update(expected).digest()
+      )
+    )
+      return res.status(401).json({ error: 'That code isn’t correct. Try again.' });
+    let profile = get('SELECT * FROM friend_profiles WHERE name=?', name);
+    if (!profile) {
+      db.exec('BEGIN');
+      try {
+        let group = get('SELECT group_id FROM friend_profiles LIMIT 1');
+        if (!group) {
+          const created = run(
+            'INSERT INTO groups(name,invite) VALUES(?,?)',
+            'The Friday Club',
+            randomBytes(5).toString('hex').toUpperCase()
+          );
+          group = { group_id: Number(created.lastInsertRowid) };
+          seed(group.group_id);
+        }
+        for (const member of ['Chris', 'Matthew', 'Yash']) {
+          if (get('SELECT name FROM friend_profiles WHERE name=?', member)) continue;
+          const username = get('SELECT id FROM users WHERE username=?', member)
+            ? `${member}_${randomBytes(4).toString('hex')}`
+            : member;
+          const result = run(
+            'INSERT INTO users(username,password,group_id) VALUES(?,?,?)',
+            username,
+            passwordHash(randomBytes(32).toString('hex')),
+            group.group_id
+          );
+          run(
+            'INSERT INTO friend_profiles VALUES(?,?,?)',
+            member,
+            result.lastInsertRowid,
+            group.group_id
+          );
+        }
+        db.exec('COMMIT');
+        profile = get('SELECT * FROM friend_profiles WHERE name=?', name);
+      } catch (e) {
+        db.exec('ROLLBACK');
+        throw e;
+      }
+    }
+    setSession(res, profile.user_id);
+    res.json({ ok: true });
   });
   app.post('/api/auth/register', (req, res) => {
     const { username, password, invite, groupName } = req.body;
@@ -330,11 +430,122 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
     res.json({ ok: true });
   });
   app.use('/api', requireUser);
+  app.post('/api/catalog/refresh', async (req, res) => {
+    try {
+      res.json(await catalog.refresh(res.locals.user.group_id, !!req.body.force));
+    } catch (e) {
+      res.status(e instanceof CatalogError ? e.status : 503).json({ error: (e as Error).message });
+    }
+  });
+  app.post('/api/catalog/search', async (req, res) => {
+    const query = typeof req.body.query === 'string' ? req.body.query.trim() : '';
+    const page = req.body.page ?? 1;
+    if (query.length < 2 || query.length > 100 || !Number.isInteger(page) || page < 1 || page > 500)
+      return res.status(400).json({ error: 'Enter a movie title and a valid page.' });
+    try {
+      res.json(await catalog.search(res.locals.user.group_id, query, page));
+    } catch (e) {
+      res.status(503).json({ error: (e as Error).message });
+    }
+  });
+  app.get('/api/catalog/poster/:id', async (req, res) => {
+    const u: User = res.locals.user;
+    const id = String(req.params.id);
+    if (!get('SELECT id FROM movies WHERE group_id=? AND id=?', u.group_id, id))
+      return res.status(404).json({ error: 'Movie not found.' });
+    const cached = get(
+      'SELECT details FROM movie_metadata WHERE group_id=? AND movie_id=?',
+      u.group_id,
+      id
+    );
+    if (cached) return res.json({ posterPath: JSON.parse(cached.details).posterPath });
+    try {
+      const movie = /^tt\d+$/.test(id)
+        ? await catalog.provider.resolve(id)
+        : /^tmdb:\d+$/.test(id)
+          ? await catalog.provider.details(Number(id.slice(5)))
+          : null;
+      if (movie) catalog.store(u.group_id, { ...movie, id });
+      res.json({ posterPath: movie?.posterPath || null });
+    } catch (e) {
+      res.status(503).json({ error: (e as Error).message });
+    }
+  });
+  app.post('/api/review/start', async (req, res) => {
+    const u: User = res.locals.user;
+    const kind = req.body.kind;
+    if (!['starter', 'weekly'].includes(kind))
+      return res.status(400).json({ error: 'Choose a starter or Friday review.' });
+    let batch = get(
+      'SELECT * FROM review_batches WHERE user_id=? AND kind=? AND completed=0 ORDER BY id DESC LIMIT 1',
+      u.id,
+      kind
+    );
+    let warning: string | null = null;
+    if (!batch) {
+      if (catalog.provider.configured)
+        try {
+          await catalog.refresh(u.group_id);
+        } catch (e) {
+          warning = (e as Error).message;
+        }
+      const movies = groupMovies(u.group_id),
+        preferences = prefs(u.group_id),
+        n = currentNight(u.group_id),
+        attendees = JSON.parse(n.attendees);
+      const mine = preferences.filter((p) => p.user_id === u.id);
+      const reviewed = new Set(mine.filter((p) => p.reviewed).map((p) => p.movie_id));
+      const pool = movies.filter(
+        (m) => !reviewed.has(m.id) && (kind === 'starter' || eligible(u.group_id, n, m.id))
+      );
+      const comparisons = all(
+        'SELECT r.user_id,r.comparison,n.movie_id,p.movie_id AS previous_movie_id FROM ratings r JOIN nights n ON n.id=r.night_id JOIN nights p ON p.id=r.comparison_id WHERE n.group_id=?',
+        u.group_id
+      );
+      const chosen =
+        kind === 'starter'
+          ? pool
+              .sort(
+                (a, b) =>
+                  Number(b.source === 'tmdb') - Number(a.source === 'tmdb') ||
+                  ((b as any).quality || 0) - ((a as any).quality || 0)
+              )
+              .slice(0, Math.max(0, 50 - reviewed.size))
+          : diverseDeck(
+              rankMovies(movies, preferences, attendees, comparisons).filter((m) =>
+                pool.some((p) => p.id === m.id)
+              ),
+              20
+            );
+      const movieIds = chosen.map((m) => m.id);
+      if (!movieIds.length)
+        return res.json({ batch: { id: null, kind, movieIds: [], answered: [] }, warning });
+      const result = run(
+        'INSERT INTO review_batches(user_id,kind,movie_ids,created_at) VALUES(?,?,?,?)',
+        u.id,
+        kind,
+        JSON.stringify(movieIds),
+        Date.now()
+      );
+      batch = get('SELECT * FROM review_batches WHERE id=?', result.lastInsertRowid);
+    }
+    res.json({
+      batch: {
+        id: batch.id,
+        kind: batch.kind,
+        movieIds: JSON.parse(batch.movie_ids),
+        answered: all('SELECT movie_id FROM review_answers WHERE batch_id=?', batch.id).map(
+          (x) => x.movie_id
+        ),
+      },
+      warning,
+    });
+  });
   app.get('/api/state', (_req, res) => {
     const u: User = res.locals.user;
     const group = get('SELECT * FROM groups WHERE id=?', u.group_id);
     const members = all(
-      'SELECT id,username FROM users WHERE group_id=? ORDER BY id',
+      'SELECT u.id,COALESCE(f.name,u.username) AS username FROM users u LEFT JOIN friend_profiles f ON f.user_id=u.id WHERE u.group_id=? ORDER BY u.id',
       u.group_id
     ).map((m) => ({ ...m, username: group.demo ? m.username.split('_')[0] : m.username }));
     const n = currentNight(u.group_id);
@@ -345,66 +556,50 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
       'SELECT r.user_id,r.comparison,n.movie_id,previous.movie_id AS previous_movie_id FROM ratings r JOIN nights n ON n.id=r.night_id JOIN nights previous ON previous.id=r.comparison_id WHERE n.group_id=?',
       u.group_id
     );
-    const scored = movies
-      .map((m, catalogIndex) => {
-        const personal = preferences.find((p) => p.user_id === u.id && p.movie_id === m.id);
-        const seenBy = members
-          .filter((member) =>
-            preferences.some(
-              (p) => p.user_id === member.id && p.movie_id === m.id && p.reaction.startsWith('seen')
-            )
+    const ranked = rankMovies(movies, preferences, attendees, comparisons);
+    const scored = ranked.map((m) => {
+      const personal = preferences.find((p) => p.user_id === u.id && p.movie_id === m.id);
+      const seenBy = members
+        .filter((member) =>
+          preferences.some(
+            (p) => p.user_id === member.id && p.movie_id === m.id && p.reaction.startsWith('seen')
           )
-          .map((x) => x.id);
-        const queuedBy = preferences
-          .filter((p) => p.movie_id === m.id && p.queued)
-          .map((p) => ({ id: p.user_id, priority: !!p.priority }));
-        const affinities = attendees.map((id) => {
-          const rated = preferences.filter(
-            (p) => p.user_id === id && p.reaction.startsWith('seen')
-          );
-          let score = 0;
-          for (const p of rated) {
-            const watched = movies.find((x) => x.id === p.movie_id);
-            if (!watched) continue;
-            const overlap = m.genres.filter((g) => watched.genres.includes(g)).length;
-            score +=
-              overlap *
-              ({ seen_loved: 2, seen_liked: 1, seen_okay: 0, seen_bad: -2 }[
-                p.reaction as 'seen_loved'
-              ] ?? 0);
-          }
-          for (const c of comparisons.filter((c) => c.user_id === id && c.comparison !== 'same')) {
-            const current = movies.find((x) => x.id === c.movie_id),
-              previous = movies.find((x) => x.id === c.previous_movie_id);
-            const direction = c.comparison === 'better' ? 1 : -1;
-            score +=
-              direction *
-              0.5 *
-              (m.genres.filter((g) => current?.genres.includes(g)).length -
-                m.genres.filter((g) => previous?.genres.includes(g)).length);
-          }
-          return score / Math.max(1, rated.length);
-        });
-        const score =
-          (affinities.length
-            ? Math.min(...affinities) + affinities.reduce((a, b) => a + b, 0) / affinities.length
-            : 0) +
-          queuedBy.length * 0.8 +
-          queuedBy.filter((p) => p.priority).length * 1.5;
-        return {
-          ...m,
-          catalogIndex,
-          reaction: personal?.reaction ?? 'unseen',
-          reviewed: !!personal?.reviewed,
-          queued: !!personal?.queued,
-          priority: !!personal?.priority,
-          seenBy,
-          queuedBy,
-          eligible: !seenBy.some((id) => attendees.includes(id)),
-          score,
-        };
-      })
-      .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
+        )
+        .map((x) => x.id);
+      const queuedBy = preferences
+        .filter((p) => p.movie_id === m.id && p.queued)
+        .map((p) => ({ id: p.user_id, priority: !!p.priority }));
+      const eligible = !seenBy.some((id) => attendees.includes(id));
+      return {
+        ...m,
+        predictions: undefined,
+        details: undefined,
+        keywords: undefined,
+        directors: undefined,
+        cast: undefined,
+        neighbors: undefined,
+        quality: undefined,
+        votes: undefined,
+        posterPath: (m as any).posterPath || null,
+        catalogIndex: movies.findIndex((x) => x.id === m.id),
+        reaction: personal?.reaction ?? 'unseen',
+        reviewed: !!personal?.reviewed,
+        queued: !!personal?.queued,
+        priority: !!personal?.priority,
+        seenBy,
+        queuedBy,
+        eligible,
+        approved: eligible,
+        confirmedUnseen:
+          eligible &&
+          attendees.every((id) =>
+            preferences.some(
+              (p) =>
+                p.user_id === id && p.movie_id === m.id && p.reviewed && p.reaction === 'unseen'
+            )
+          ),
+      };
+    });
     const nights = all(
       'SELECT * FROM nights WHERE group_id=? ORDER BY date DESC,id DESC',
       u.group_id
@@ -415,6 +610,19 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
       ratings: all('SELECT * FROM ratings WHERE night_id=?', night.id),
     }));
     res.json({
+      authMode,
+      catalog: catalog.status(u.group_id),
+      onboarding: {
+        target: 50,
+        reviewed: Math.min(50, preferences.filter((p) => p.user_id === u.id && p.reviewed).length),
+        members: members.map((m) => ({
+          id: m.id,
+          reviewed: Math.min(
+            50,
+            preferences.filter((p) => p.user_id === m.id && p.reviewed).length
+          ),
+        })),
+      },
       user: { id: u.id, username: members.find((m) => m.id === u.id)?.username },
       group,
       members,
@@ -426,7 +634,12 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
   });
   app.post('/api/preferences', (req, res) => {
     const u: User = res.locals.user;
-    const { movieId, reaction, queued, priority } = req.body;
+    const { movieId, reaction, queued, priority, batchId } = req.body;
+    const batch = batchId
+      ? get('SELECT * FROM review_batches WHERE id=? AND user_id=?', batchId, u.id)
+      : null;
+    if (batchId && (!batch || !JSON.parse(batch.movie_ids).includes(movieId)))
+      return res.status(400).json({ error: 'That movie is not in your review batch.' });
     if (!get('SELECT id FROM movies WHERE group_id=? AND id=?', u.group_id, movieId))
       return res.status(404).json({ error: 'Movie not found.' });
     if (reaction !== undefined && !reactions.includes(reaction))
@@ -446,6 +659,17 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
       priority === undefined ? (old?.priority ?? 0) : Number(!!priority),
       reaction !== undefined ? 1 : (old?.reviewed ?? 0)
     );
+    if (reaction?.startsWith('seen'))
+      run('INSERT OR IGNORE INTO catalog_dirty VALUES(?)', u.group_id);
+    if (batch && reaction !== undefined) {
+      run('INSERT OR IGNORE INTO review_answers VALUES(?,?)', batch.id, movieId);
+      const answered = get(
+        'SELECT COUNT(*) AS count FROM review_answers WHERE batch_id=?',
+        batch.id
+      ).count;
+      if (answered >= JSON.parse(batch.movie_ids).length)
+        run('UPDATE review_batches SET completed=1 WHERE id=?', batch.id);
+    }
     res.json({ ok: true });
   });
   app.post('/api/night/settings', (req, res) => {
@@ -615,6 +839,7 @@ export function createApp(dbPath = process.env.DB_PATH || 'data/movie-night.sqli
       u.id,
       n.movie_id
     );
+    run('INSERT OR IGNORE INTO catalog_dirty VALUES(?)', u.group_id);
     res.json({ ok: true });
   });
   app.post('/api/catalog/import', (req, res) => {

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 async function setup(dbPath = ':memory:') {
-  const { app, db } = createApp(dbPath);
+  const { app, db } = createApp(dbPath, { authMode: 'accounts', catalog: { token: '' } });
   const server = app.listen(0, '127.0.0.1');
   await new Promise<void>((r) => server.once('listening', r));
   const root = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -210,7 +210,7 @@ test('accounts, hashed sessions, and permanent viewing history survive a databas
   } finally {
     await f.close();
   }
-  const restored = createApp(dbPath);
+  const restored = createApp(dbPath, { authMode: 'accounts', catalog: { token: '' } });
   try {
     const stored = restored.db
       .prepare('SELECT * FROM preferences WHERE movie_id=?')

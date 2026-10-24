@@ -1,4 +1,12 @@
-import React, { useState, useEffect, useRef, type FormEvent, type CSSProperties } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useContext,
+  createContext,
+  type FormEvent,
+  type CSSProperties,
+} from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   ArrowUpRight,
@@ -46,6 +54,10 @@ import '@fontsource/manrope/latin-600.css';
 import '@fontsource/manrope/latin-700.css';
 import '@fontsource/manrope/latin-800.css';
 import './styles.css';
+import { FriendLogin } from './FriendLogin';
+import { WheelAudio } from './wheel-audio';
+import { officialPoster } from './posters';
+const CatalogContext = createContext(false);
 
 async function api<T = any>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(
@@ -82,30 +94,56 @@ function Avatar({
   );
 }
 function Poster({ movie, large = false }: { movie: Movie; large?: boolean }) {
-  let hash = 0;
-  for (const c of movie.id) hash = (hash * 31 + c.charCodeAt(0)) >>> 0;
-  const variant = hash % 6;
+  const configured = useContext(CatalogContext);
+  const [path, setPath] = useState(movie.posterPath || null),
+    [failed, setFailed] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    setPath(movie.posterPath || null);
+    setFailed(false);
+  }, [movie.id, movie.posterPath]);
+  useEffect(() => {
+    if (!configured || path || !ref.current) return;
+    let alive = true;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          observer.disconnect();
+          void officialPoster(movie.id).then((p) => {
+            if (alive) setPath(p);
+          });
+        }
+      },
+      { rootMargin: '200px' }
+    );
+    observer.observe(ref.current);
+    return () => {
+      alive = false;
+      observer.disconnect();
+    };
+  }, [movie.id, configured, path]);
   return (
-    <div
-      className={`poster art-${variant} ${large ? 'large' : ''}`}
-      aria-label={`${movie.title} illustrated title card`}
-    >
-      <div className="poster-noise" />
-      <div className="poster-shape shape-a" />
-      <div className="poster-shape shape-b" />
-      <div className="poster-shape shape-c" />
-      <span className="poster-edition">A MOVIE NIGHT SELECTION</span>
-      <div className="poster-title">{movie.title}</div>
-      <div className="poster-bottom">
-        <span>{movie.year}</span>
-        <span>✳</span>
-        <span>ENGLISH</span>
-      </div>
+    <div ref={ref} className={`poster official-poster ${large ? 'large' : ''}`}>
+      {path && !failed ? (
+        <img
+          src={`https://image.tmdb.org/t/p/w500${path}`}
+          alt={`${movie.title} official poster`}
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <div className="poster-placeholder">
+          <Film size={27} />
+          <span>{movie.title}</span>
+          <small>{configured ? 'POSTER UNAVAILABLE' : 'CONNECT TMDB FOR OFFICIAL POSTERS'}</small>
+        </div>
+      )}
     </div>
   );
 }
 function App() {
   const [auth, setAuth] = useState<boolean | null>(null),
+    [authMode, setAuthMode] = useState<'friends' | 'accounts'>('friends'),
     [state, setState] = useState<State | null>(null),
     [page, setPage] = useState('home'),
     [toast, setToast] = useState(''),
@@ -116,6 +154,17 @@ function App() {
     [detail, setDetail] = useState<Movie | null>(null),
     [settings, setSettings] = useState(false);
   const mounted = useRef(true);
+  const promptedProfile = useRef<number | null>(null);
+  useEffect(() => {
+    if (
+      state?.authMode === 'friends' &&
+      state.onboarding.reviewed < 50 &&
+      promptedProfile.current !== state.user.id
+    ) {
+      promptedProfile.current = state.user.id;
+      setReview('starter');
+    }
+  }, [state?.user.id, state?.onboarding.reviewed]);
   async function refresh() {
     try {
       const s = await api<State>('/state');
@@ -127,7 +176,10 @@ function App() {
   }
   useEffect(() => {
     api('/auth')
-      .then((d) => setAuth(!!d.user))
+      .then((d) => {
+        setAuthMode(d.mode);
+        setAuth(!!d.user);
+      })
       .catch((e) => setError(e.message));
     return () => {
       mounted.current = false;
@@ -191,12 +243,21 @@ function App() {
   if (!auth)
     return (
       <>
-        <Auth
-          onLogin={() => {
-            setAuth(true);
-            setError('');
-          }}
-        />
+        {authMode === 'friends' ? (
+          <FriendLogin
+            onLogin={() => {
+              setAuth(true);
+              setError('');
+            }}
+          />
+        ) : (
+          <Auth
+            onLogin={() => {
+              setAuth(true);
+              setError('');
+            }}
+          />
+        )}
         {notice}
       </>
     );
@@ -212,334 +273,367 @@ function App() {
   const nav = [
     { id: 'home', label: 'The clubhouse', icon: LayoutDashboard },
     { id: 'tonight', label: 'This Friday', icon: Disc3 },
-    { id: 'discover', label: 'Discover movies', icon: Sparkles },
+    { id: 'discover', label: 'Approved list', icon: Sparkles },
     { id: 'queues', label: 'Our watchlists', icon: Bookmark },
     { id: 'history', label: 'Past Fridays', icon: Clapperboard },
   ];
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <button className="brand" onClick={() => setPage('home')}>
-          <span className="brand-mark">✳</span>
-          <span>
-            movie<span className="brand-light">night</span>
-            <span className="brand-period">.</span>
-          </span>
-        </button>
-        <div className="club-switch">
-          <span className="club-icon">
-            <Film size={19} />
-          </span>
-          <span>
-            {s.group.name}
-            <small>THE GOOD COMPANY CLUB</small>
-          </span>
-          <button onClick={() => setSettings(true)} aria-label="Group settings">
-            <ChevronDown size={15} />
-          </button>
-        </div>
-        <div className="nav-label">YOUR FRIDAY RITUAL</div>
-        <nav>
-          {nav.map((n) => (
-            <button
-              className={page === n.id ? 'active' : ''}
-              key={n.id}
-              title={n.label}
-              onClick={() => setPage(n.id)}
-            >
-              <n.icon size={19} />
-              {n.label}
-              {n.id === 'tonight' && <span className="nav-dot" />}
-              {n.id === 'queues' && (
-                <span className="nav-count">
-                  {s.movies.filter((m) => m.queuedBy.length).length}
-                </span>
-              )}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="club-rule">
-            <span>THE ONLY RULE</span>
-            <p>
-              New to everyone.
-              <br />
-              Good for everyone.
-            </p>
-            <span className="rule-star">✳</span>
-          </div>
-          <button className="settings-link" onClick={() => setSettings(true)}>
-            <Settings size={18} />
-            Group & settings
-          </button>
-          <button className="profile" onClick={() => setSettings(true)}>
-            <Avatar member={s.user} />
+    <CatalogContext.Provider value={s.catalog.configured}>
+      <div className="app-shell">
+        <aside className="sidebar">
+          <button className="brand" onClick={() => setPage('home')}>
+            <span className="brand-mark">✳</span>
             <span>
-              {s.user.username}
-              <small>{s.group.demo ? 'EXPLORING THE DEMO' : 'READY FOR FRIDAY'}</small>
+              movie<span className="brand-light">night</span>
+              <span className="brand-period">.</span>
             </span>
-            <ChevronRight size={15} />
           </button>
-        </div>
-      </aside>
-      <div className="workspace">
-        <header className="topbar">
-          <span className="breadcrumb">
-            Your little corner of cinema <span>/</span>{' '}
-            <b>{nav.find((n) => n.id === page)?.label}</b>
-          </span>
-          <div className="topbar-right">
-            {!!s.group.demo && <span className="demo-label">DEMO CLUB</span>}
-            <span className="live-pill">
-              <i /> Friday people
+          <div className="club-switch">
+            <span className="club-icon">
+              <Film size={19} />
             </span>
-            <button
-              className="avatar-stack"
-              aria-label="Open group settings"
-              onClick={() => setSettings(true)}
-            >
-              {s.members.map((m, i) => (
-                <Avatar key={m.id} member={m} index={i} small />
-              ))}
+            <span>
+              {s.group.name}
+              <small>THE GOOD COMPANY CLUB</small>
+            </span>
+            <button onClick={() => setSettings(true)} aria-label="Group settings">
+              <ChevronDown size={15} />
             </button>
           </div>
-        </header>
-        <main>
-          {page === 'home' && (
-            <>
-              <div className="page-heading">
+          <div className="nav-label">YOUR FRIDAY RITUAL</div>
+          <nav>
+            {nav.map((n) => (
+              <button
+                className={page === n.id ? 'active' : ''}
+                key={n.id}
+                title={n.label}
+                onClick={() => setPage(n.id)}
+              >
+                <n.icon size={19} />
+                {n.label}
+                {n.id === 'tonight' && <span className="nav-dot" />}
+                {n.id === 'queues' && (
+                  <span className="nav-count">
+                    {s.movies.filter((m) => m.queuedBy.length).length}
+                  </span>
+                )}
+              </button>
+            ))}
+          </nav>
+          <div className="sidebar-bottom">
+            <div className="club-rule">
+              <span>THE ONLY RULE</span>
+              <p>
+                New to everyone.
+                <br />
+                Good for everyone.
+              </p>
+              <span className="rule-star">✳</span>
+            </div>
+            <button className="settings-link" onClick={() => setSettings(true)}>
+              <Settings size={18} />
+              Group & settings
+            </button>
+            <button className="profile" onClick={() => setSettings(true)}>
+              <Avatar member={s.user} />
+              <span>
+                {s.user.username}
+                <small>{s.group.demo ? 'EXPLORING THE DEMO' : 'READY FOR FRIDAY'}</small>
+              </span>
+              <ChevronRight size={15} />
+            </button>
+          </div>
+        </aside>
+        <div className="workspace">
+          <header className="topbar">
+            <span className="breadcrumb">
+              Your little corner of cinema <span>/</span>{' '}
+              <b>{nav.find((n) => n.id === page)?.label}</b>
+            </span>
+            <div className="topbar-right">
+              {!!s.group.demo && <span className="demo-label">DEMO CLUB</span>}
+              <span className="live-pill">
+                <i /> Friday people
+              </span>
+              <button
+                className="avatar-stack"
+                aria-label="Open group settings"
+                onClick={() => setSettings(true)}
+              >
+                {s.members.map((m, i) => (
+                  <Avatar key={m.id} member={m} index={i} small />
+                ))}
+              </button>
+            </div>
+          </header>
+          <main>
+            {s.onboarding.reviewed < 50 && (
+              <div className="onboarding-banner">
+                <Sparkles size={20} />
                 <div>
-                  <div className="eyebrow">GOOD FILMS. BETTER COMPANY.</div>
-                  <h1>
-                    Friday looks good <em>on you.</em>
-                  </h1>
-                  <p>Less “have you seen it?” More press play.</p>
+                  <b>Your taste starts here</b>
+                  <p>
+                    {s.onboarding.reviewed}/50 movies rated. A seen reaction teaches your taste; an
+                    unseen swipe keeps a movie eligible.
+                  </p>
                 </div>
-                <button className="date-badge" onClick={() => setPage('tonight')}>
-                  <CalendarDays size={18} />
-                  {formatDate(s.night.date)}
-                  <ArrowUpRight size={16} />
+                <button className="button lime" onClick={() => setReview('starter')}>
+                  Continue my first 50 <ArrowRight size={16} />
                 </button>
               </div>
-              <div className="home-grid">
-                <div className="home-main">
-                  <section className="hero">
-                    <div className="hero-text">
-                      <span className="pill">
-                        <span className="little-star">✳</span> EVERYONE’S NEXT FAVORITE
-                      </span>
-                      <h2>
-                        Three friends.
-                        <br />
-                        One screen.
-                        <br />
-                        <em>Zero reruns.</em>
-                      </h2>
-                      <p>
-                        A little less scrolling.
-                        <br />A whole lot more movie night.
-                      </p>
-                      <button className="button lime" onClick={() => setPage('discover')}>
-                        Find our next movie
-                        <ArrowUpRight size={17} />
-                      </button>
-                    </div>
-                    <div className="hero-art" aria-hidden="true">
-                      <div className="orbit orbit-one" />
-                      <div className="orbit orbit-two" />
-                      <div className="hero-ticket ticket-back">
-                        <span>ADMIT THREE</span>
-                        <b>
-                          FRIDAY
-                          <br />
-                          FILM CLUB
-                        </b>
-                        <div className="ticket-stub">NO RERUNS · JUST GOOD COMPANY</div>
-                      </div>
-                      <div className="hero-ticket ticket-front">
-                        <span className="ticket-top">
-                          THE FRIDAY SPECIAL <span>✳</span>
+            )}
+            {page === 'home' && (
+              <>
+                <div className="page-heading">
+                  <div>
+                    <div className="eyebrow">GOOD FILMS. BETTER COMPANY.</div>
+                    <h1>
+                      Friday looks good <em>on you.</em>
+                    </h1>
+                    <p>Less “have you seen it?” More press play.</p>
+                  </div>
+                  <button className="date-badge" onClick={() => setPage('tonight')}>
+                    <CalendarDays size={18} />
+                    {formatDate(s.night.date)}
+                    <ArrowUpRight size={16} />
+                  </button>
+                </div>
+                <div className="home-grid">
+                  <div className="home-main">
+                    <section className="hero">
+                      <div className="hero-text">
+                        <span className="pill">
+                          <span className="little-star">✳</span> EVERYONE’S NEXT FAVORITE
                         </span>
-                        <div className="ticket-sun" />
-                        <b>
-                          MAKE IT
-                          <br />A MOVIE
-                          <br />
-                          <i>NIGHT.</i>
-                        </b>
-                        <span className="ticket-serial">EST. EVERY FRIDAY &nbsp; • &nbsp; 001</span>
-                      </div>
-                      <span className="hero-spark spark-one">✳</span>
-                      <span className="hero-spark spark-two">✳</span>
-                      <span className="hero-caption">SAME PEOPLE. NEW STORIES.</span>
-                    </div>
-                  </section>
-                  <section className="recommendations">
-                    <div className="section-heading">
-                      <div>
-                        <span className="eyebrow">THE NEXT GREAT FRIDAY</span>
                         <h2>
-                          Fresh for all of us <span className="count-pill">{eligible.length}</span>
+                          Three friends.
+                          <br />
+                          One screen.
+                          <br />
+                          <em>Zero reruns.</em>
                         </h2>
+                        <p>
+                          A little less scrolling.
+                          <br />A whole lot more movie night.
+                        </p>
+                        <button className="button lime" onClick={() => setPage('discover')}>
+                          Find our next movie
+                          <ArrowUpRight size={17} />
+                        </button>
                       </div>
-                      <button className="text-button" onClick={() => setPage('discover')}>
-                        View all <ArrowUpRight size={16} />
-                      </button>
-                    </div>
-                    <div className="movie-grid home-movies">
-                      {eligible.slice(0, 4).map((m) => (
-                        <MovieCard
-                          key={m.id}
-                          movie={m}
-                          onOpen={() => setDetail(m)}
-                          onQueue={() =>
-                            action(
-                              '/preferences',
-                              { movieId: m.id, queued: !m.queued },
-                              m.queued ? 'Removed from your watchlist' : 'Added to your watchlist'
-                            )
-                          }
+                      <div className="hero-art" aria-hidden="true">
+                        <div className="orbit orbit-one" />
+                        <div className="orbit orbit-two" />
+                        <div className="hero-ticket ticket-back">
+                          <span>ADMIT THREE</span>
+                          <b>
+                            FRIDAY
+                            <br />
+                            FILM CLUB
+                          </b>
+                          <div className="ticket-stub">NO RERUNS · JUST GOOD COMPANY</div>
+                        </div>
+                        <div className="hero-ticket ticket-front">
+                          <span className="ticket-top">
+                            THE FRIDAY SPECIAL <span>✳</span>
+                          </span>
+                          <div className="ticket-sun" />
+                          <b>
+                            MAKE IT
+                            <br />A MOVIE
+                            <br />
+                            <i>NIGHT.</i>
+                          </b>
+                          <span className="ticket-serial">
+                            EST. EVERY FRIDAY &nbsp; • &nbsp; 001
+                          </span>
+                        </div>
+                        <span className="hero-spark spark-one">✳</span>
+                        <span className="hero-spark spark-two">✳</span>
+                        <span className="hero-caption">SAME PEOPLE. NEW STORIES.</span>
+                      </div>
+                    </section>
+                    <section className="recommendations">
+                      <div className="section-heading">
+                        <div>
+                          <span className="eyebrow">THE NEXT GREAT FRIDAY</span>
+                          <h2>
+                            Fresh for all of us{' '}
+                            <span className="count-pill">{eligible.length}</span>
+                          </h2>
+                        </div>
+                        <button className="text-button" onClick={() => setPage('discover')}>
+                          View all <ArrowUpRight size={16} />
+                        </button>
+                      </div>
+                      <div className="movie-grid home-movies">
+                        {eligible.slice(0, 4).map((m) => (
+                          <MovieCard
+                            key={m.id}
+                            movie={m}
+                            onOpen={() => setDetail(m)}
+                            onQueue={() =>
+                              action(
+                                '/preferences',
+                                { movieId: m.id, queued: !m.queued },
+                                m.queued ? 'Removed from your watchlist' : 'Added to your watchlist'
+                              )
+                            }
+                          />
+                        ))}
+                      </div>
+                      {!eligible.length && (
+                        <Empty
+                          title="Time for a new batch"
+                          text="Import more English-language movies in group settings."
                         />
-                      ))}
-                    </div>
-                    {!eligible.length && (
-                      <Empty
-                        title="Time for a new batch"
-                        text="Import more English-language movies in group settings."
-                      />
-                    )}
-                  </section>
+                      )}
+                    </section>
+                  </div>
+                  <div className="home-side">
+                    <TonightCard s={s} onOpen={() => setPage('tonight')} />
+                    <section className="panel tune-panel">
+                      <div className="mini-icon">
+                        <Sparkles size={21} />
+                      </div>
+                      <span className="eyebrow">A LITTLE TASTE CHECK</span>
+                      <h3>
+                        Make the next pick
+                        <br />
+                        <em>even better.</em>
+                      </h3>
+                      <p>
+                        20 movies. Your honest reactions.
+                        <br />
+                        Your group’s next favorites.
+                      </p>
+                      <button className="button outline" onClick={() => setReview('weekly')}>
+                        Do the Friday 20 <ArrowRight size={16} />
+                      </button>
+                      <div className="tiny-note">No spoilers. Just gut feelings.</div>
+                    </section>
+                  </div>
                 </div>
-                <div className="home-side">
-                  <TonightCard s={s} onOpen={() => setPage('tonight')} />
-                  <section className="panel tune-panel">
-                    <div className="mini-icon">
-                      <Sparkles size={21} />
-                    </div>
-                    <span className="eyebrow">A LITTLE TASTE CHECK</span>
-                    <h3>
-                      Make the next pick
-                      <br />
-                      <em>even better.</em>
-                    </h3>
-                    <p>
-                      20 movies. Your honest reactions.
-                      <br />
-                      Your group’s next favorites.
-                    </p>
-                    <button className="button outline" onClick={() => setReview('weekly')}>
-                      Do the Friday 20 <ArrowRight size={16} />
-                    </button>
-                    <div className="tiny-note">No spoilers. Just gut feelings.</div>
-                  </section>
+                <div className="bottom-strip">
+                  <span className="strip-star">✳</span>
+                  <span>
+                    <b>One rule. A world of possibilities.</b> If someone’s seen it, it’s off the
+                    table.
+                  </span>
+                  <button className="text-button" onClick={() => setReview('starter')}>
+                    Build my movie memory <ArrowUpRight size={16} />
+                  </button>
                 </div>
-              </div>
-              <div className="bottom-strip">
-                <span className="strip-star">✳</span>
-                <span>
-                  <b>One rule. A hundred possibilities.</b> If someone’s seen it, it’s off the
-                  table.
-                </span>
-                <button className="text-button" onClick={() => setReview('starter')}>
-                  Build my movie memory <ArrowUpRight size={16} />
-                </button>
-              </div>
-            </>
-          )}
-          {page === 'tonight' && (
-            <Tonight
-              s={s}
-              action={action}
-              busy={busy}
-              onBrowse={() => setPage('discover')}
-              onRate={setRate}
-            />
-          )}
-          {page === 'discover' && (
-            <Discover
-              s={s}
-              onOpen={setDetail}
-              onQueue={(m) =>
-                action(
-                  '/preferences',
-                  { movieId: m.id, queued: !m.queued },
-                  m.queued ? 'Removed from your watchlist' : 'Added to your watchlist'
-                )
-              }
-              onReview={() => setReview('weekly')}
-            />
-          )}
-          {page === 'queues' && (
-            <Queues s={s} onOpen={setDetail} action={action} onBrowse={() => setPage('discover')} />
-          )}
-          {page === 'history' && (
-            <>
-              <PageHeading
-                eyebrow="THE FRIDAY ARCHIVE"
-                title="Good nights, on record."
-                text="Every pick. Every opinion. Your growing collection of Fridays."
+              </>
+            )}
+            {page === 'tonight' && (
+              <Tonight
+                s={s}
+                action={action}
+                busy={busy}
+                onBrowse={() => setPage('discover')}
+                onRate={setRate}
               />
-              {completed.length ? (
-                <div className="history-list">
-                  {completed.map((n) => (
-                    <HistoryCard key={n.id} night={n} s={s} onRate={() => setRate(n)} />
-                  ))}
-                </div>
-              ) : (
-                <Empty
-                  title="Your first Friday is waiting"
-                  text="Finish a movie night and it’ll live here, along with everyone’s ratings."
-                  action={
-                    <button className="button lime" onClick={() => setPage('tonight')}>
-                      Plan our first night <ArrowRight size={16} />
-                    </button>
-                  }
+            )}
+            {page === 'discover' && (
+              <Discover
+                s={s}
+                onOpen={setDetail}
+                onQueue={(m) =>
+                  action(
+                    '/preferences',
+                    { movieId: m.id, queued: !m.queued },
+                    m.queued ? 'Removed from your watchlist' : 'Added to your watchlist'
+                  )
+                }
+                onReview={() => setReview('weekly')}
+                action={action}
+              />
+            )}
+            {page === 'queues' && (
+              <Queues
+                s={s}
+                onOpen={setDetail}
+                action={action}
+                onBrowse={() => setPage('discover')}
+              />
+            )}
+            {page === 'history' && (
+              <>
+                <PageHeading
+                  eyebrow="THE FRIDAY ARCHIVE"
+                  title="Good nights, on record."
+                  text="Every pick. Every opinion. Your growing collection of Fridays."
                 />
-              )}
-            </>
-          )}
-          <footer>
-            <span>✳ &nbsp; A Friday worth looking forward to.</span>
-            <span>MADE FOR YOUR KIND OF MOVIE PEOPLE</span>
-          </footer>
-        </main>
+                {completed.length ? (
+                  <div className="history-list">
+                    {completed.map((n) => (
+                      <HistoryCard key={n.id} night={n} s={s} onRate={() => setRate(n)} />
+                    ))}
+                  </div>
+                ) : (
+                  <Empty
+                    title="Your first Friday is waiting"
+                    text="Finish a movie night and it’ll live here, along with everyone’s ratings."
+                    action={
+                      <button className="button lime" onClick={() => setPage('tonight')}>
+                        Plan our first night <ArrowRight size={16} />
+                      </button>
+                    }
+                  />
+                )}
+              </>
+            )}
+            <footer>
+              <span>✳ &nbsp; A Friday worth looking forward to.</span>
+              <span>
+                Movie data & posters: TMDB · This product uses the TMDB API but is not endorsed or
+                certified by TMDB.
+              </span>
+            </footer>
+          </main>
+        </div>
+        {notice}
+        {review && (
+          <Review s={s} mode={review} onClose={() => setReview(null)} action={action} />
+        )}{' '}
+        {detail && (
+          <MovieDetail
+            movie={s.movies.find((m) => m.id === detail.id) || detail}
+            s={s}
+            onClose={() => setDetail(null)}
+            action={action}
+            busy={busy}
+          />
+        )}{' '}
+        {rate && (
+          <RateModal
+            night={s.nights.find((n) => n.id === rate.id) || rate}
+            s={s}
+            onClose={() => setRate(null)}
+            action={action}
+          />
+        )}{' '}
+        {settings && (
+          <SettingsModal
+            s={s}
+            onClose={() => setSettings(false)}
+            action={action}
+            onLogout={async () => {
+              await api('/auth/logout', {});
+              setSettings(false);
+              setPage('home');
+              setReview(null);
+              setDetail(null);
+              setRate(null);
+              setState(null);
+              promptedProfile.current = null;
+              setAuth(false);
+            }}
+          />
+        )}
       </div>
-      {notice}
-      {review && (
-        <Review s={s} mode={review} onClose={() => setReview(null)} action={action} />
-      )}{' '}
-      {detail && (
-        <MovieDetail
-          movie={s.movies.find((m) => m.id === detail.id) || detail}
-          s={s}
-          onClose={() => setDetail(null)}
-          action={action}
-          busy={busy}
-        />
-      )}{' '}
-      {rate && (
-        <RateModal
-          night={s.nights.find((n) => n.id === rate.id) || rate}
-          s={s}
-          onClose={() => setRate(null)}
-          action={action}
-        />
-      )}{' '}
-      {settings && (
-        <SettingsModal
-          s={s}
-          onClose={() => setSettings(false)}
-          action={action}
-          onLogout={async () => {
-            await api('/auth/logout', {});
-            setSettings(false);
-            setPage('home');
-            setState(null);
-            setAuth(false);
-          }}
-        />
-      )}
-    </div>
+    </CatalogContext.Provider>
   );
 }
 createRoot(document.getElementById('root')!).render(<App />);
@@ -905,29 +999,42 @@ function Discover({
   onOpen,
   onQueue,
   onReview,
+  action,
 }: {
   s: State;
   onOpen: (m: Movie) => void;
   onQueue: (m: Movie) => void;
   onReview: () => void;
+  action: Action;
 }) {
   const [search, setSearch] = useState(''),
     [filter, setFilter] = useState('eligible'),
-    [genre, setGenre] = useState('All genres');
+    [genre, setGenre] = useState('All genres'),
+    [remote, setRemote] = useState<{ ids: string[]; page: number; totalPages: number } | null>(
+      null
+    ),
+    [searching, setSearching] = useState(false);
+  async function searchCatalog(page = 1) {
+    if (search.trim().length < 2 || searching) return;
+    setSearching(true);
+    const result = await action('/catalog/search', { query: search.trim(), page });
+    if (result) setRemote(result);
+    setSearching(false);
+  }
   const movies = s.movies.filter(
     (m) =>
       (filter === 'all' ||
         (filter === 'seen' && m.reaction.startsWith('seen')) ||
         (filter === 'eligible' && m.eligible)) &&
       (genre === 'All genres' || m.genres.includes(genre)) &&
-      m.title.toLowerCase().includes(search.toLowerCase())
+      (remote ? remote.ids.includes(m.id) : m.title.toLowerCase().includes(search.toLowerCase()))
   );
   return (
     <>
       <PageHeading
         eyebrow="FIND YOUR NEXT FRIDAY"
-        title="Something new. For everyone."
-        text="Your group’s next movies, all in one place."
+        title="The approved list."
+        text="Ranked for all of you. The wheel’s picker still gets the final say."
       />
       <div className="discovery-toolbar">
         <div className="segmented compact">
@@ -935,7 +1042,7 @@ function Discover({
             className={filter === 'eligible' ? 'selected' : ''}
             onClick={() => setFilter('eligible')}
           >
-            Fresh for us <span>{s.movies.filter((m) => m.eligible).length}</span>
+            Approved <span>{s.movies.filter((m) => m.eligible).length}</span>
           </button>
           <button className={filter === 'all' ? 'selected' : ''} onClick={() => setFilter('all')}>
             All movies
@@ -956,9 +1063,22 @@ function Discover({
             aria-label="Search movies"
             placeholder="Find a movie…"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setRemote(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void searchCatalog();
+            }}
           />
         </div>
+        <button
+          className="button outline"
+          disabled={!s.catalog.configured || searching || search.trim().length < 2}
+          onClick={() => searchCatalog()}
+        >
+          {searching ? 'Searching…' : 'Search all movies'}
+        </button>
         <select
           aria-label="Filter by genre"
           value={genre}
@@ -981,9 +1101,49 @@ function Discover({
           text="Try another search or import more titles in group settings."
         />
       )}
+      {remote && remote.totalPages > 1 && (
+        <div className="catalog-pagination">
+          <button
+            className="button outline"
+            disabled={searching || remote.page <= 1}
+            onClick={() => searchCatalog(remote.page - 1)}
+          >
+            Previous
+          </button>
+          <span>
+            Page {remote.page} of {remote.totalPages}
+          </span>
+          <button
+            className="button outline"
+            disabled={searching || remote.page >= remote.totalPages}
+            onClick={() => searchCatalog(remote.page + 1)}
+          >
+            Next
+          </button>
+        </div>
+      )}
       <div className="catalog-note">
-        <Film size={16} /> Curated English-language starter library. Import an IMDb CSV in group
-        settings to add your IMDb list. This is not a live IMDb ranking.
+        <Film size={16} />
+        <span>
+          {s.catalog.configured
+            ? 'Connected to TMDB. Search the catalog or bring in more recommendations.'
+            : 'Using the saved starter library. Connect TMDB for official posters and continuous movie discovery.'}
+        </span>
+        <button
+          className="button outline"
+          disabled={!s.catalog.configured || searching}
+          onClick={async () => {
+            setSearching(true);
+            await action(
+              '/catalog/refresh',
+              { force: true },
+              'Your catalog and group recommendations are updated'
+            );
+            setSearching(false);
+          }}
+        >
+          Find more movies <Sparkles size={15} />
+        </button>
       </div>
     </>
   );
@@ -1125,9 +1285,22 @@ function Tonight({
     })
     .join(',');
   const spinTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => clearTimeout(spinTimer.current), []);
+  const wheelAudio = useRef<WheelAudio | null>(null);
+  const [sound, setSound] = useState(() => localStorage.getItem('wheel-sound') !== 'off');
+  useEffect(
+    () => () => {
+      clearTimeout(spinTimer.current);
+      wheelAudio.current?.close();
+    },
+    []
+  );
   async function spin() {
     if (spinning || busy) return;
+    let soundReady: Promise<void> | undefined;
+    if (sound) {
+      wheelAudio.current ??= new WheelAudio();
+      soundReady = wheelAudio.current.unlock();
+    }
     setSpinning(true);
     setReveal(false);
     const result = await action('/night/spin');
@@ -1139,10 +1312,13 @@ function Tonight({
     const idx = s.weights.findIndex((w) => w.id === result.winnerId);
     const middle =
       s.weights.slice(0, idx).reduce((a, b) => a + b.chance, 0) + s.weights[idx].chance / 2;
+    await soundReady;
     setRotation(1800 + (360 - middle * 3.6));
+    if (sound) wheelAudio.current?.start(4300);
     spinTimer.current = setTimeout(() => {
       setSpinning(false);
       setReveal(true);
+      wheelAudio.current?.stop();
     }, 4300);
   }
   const last = s.nights.find(
@@ -1203,6 +1379,19 @@ function Tonight({
               Taste-weighted
             </button>
           </div>
+          <button
+            className="text-button sound-toggle"
+            aria-pressed={sound}
+            onClick={() => {
+              const next = !sound;
+              setSound(next);
+              localStorage.setItem('wheel-sound', next ? 'on' : 'off');
+              if (!next) wheelAudio.current?.stop();
+            }}
+          >
+            <Volume2 size={16} />
+            {sound ? 'Wheel clicks on' : 'Wheel muted'}
+          </button>
           <div className="wheel-container">
             <div className="wheel-pointer" />
             <div
@@ -1439,7 +1628,9 @@ function MovieDetail({
           <div className={m.eligible ? 'eligibility good' : 'eligibility'}>
             {m.eligible ? <CheckCheck size={17} /> : <Check size={17} />}{' '}
             {m.eligible
-              ? 'Nobody attending has marked this seen'
+              ? m.confirmedUnseen
+                ? 'Everyone attending confirmed unseen'
+                : 'Eligible — some answers are still pending'
               : `Seen by ${s.members
                   .filter((member) => m.seenBy.includes(member.id))
                   .map((x) => x.username)
@@ -1545,70 +1736,168 @@ function Review({
   onClose: () => void;
   action: Action;
 }) {
-  const [batch] = useState(() => {
-    const available = s.movies.filter((m) => m.reaction === 'unseen');
-    if (mode === 'starter') available.sort((a, b) => a.catalogIndex - b.catalogIndex);
-    const fresh = available.filter((m) => !m.reviewed);
-    return [...fresh, ...available.filter((m) => m.reviewed)]
-      .slice(0, mode === 'starter' ? 100 : 20)
-      .map((m) => m.id);
-  });
-  const [index, setIndex] = useState(0),
+  const [batch, setBatch] = useState<{
+      id: number | null;
+      movieIds: string[];
+      answered: string[];
+    } | null>(null),
     [seen, setSeen] = useState(false),
     [queued, setQueued] = useState(false),
-    [saving, setSaving] = useState(false);
-  const startX = useRef<number | null>(null);
-  const m = s.movies.find((m) => m.id === batch[index]);
+    [saving, setSaving] = useState(false),
+    [drag, setDrag] = useState(0),
+    [exiting, setExiting] = useState(false),
+    [warning, setWarning] = useState('');
+  const gesture = useRef<{ x: number; y: number; time: number } | null>(null);
+  const flingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    let active = true;
+    void action('/review/start', { kind: mode }).then((result) => {
+      if (!active) return;
+      if (result) {
+        setBatch(result.batch);
+        setWarning(result.warning || '');
+      } else {
+        setWarning('Could not load your review. Close and try again.');
+        setBatch({ id: null, movieIds: [], answered: [] });
+      }
+    });
+    return () => {
+      active = false;
+      clearTimeout(flingTimer.current);
+    };
+  }, [mode, s.user.id]);
+  const currentId = batch?.movieIds.find((id) => !batch.answered.includes(id));
+  const m = s.movies.find((m) => m.id === currentId);
+  const done = batch?.answered.length || 0;
   async function save(reaction: Reaction) {
     if (!m || saving) return;
     setSaving(true);
     const result = await action('/preferences', {
       movieId: m.id,
       reaction,
+      batchId: batch?.id,
       ...(queued ? { queued: true, priority: true } : {}),
     });
     if (result) {
-      setIndex((i) => i + 1);
+      setBatch((b) => (b ? { ...b, answered: [...b.answered, m.id] } : b));
       setSeen(false);
       setQueued(false);
     }
+    setExiting(false);
+    setDrag(0);
     setSaving(false);
   }
+  function swipe(direction: number) {
+    if (saving || exiting || seen) return;
+    setExiting(true);
+    setDrag(direction * 420);
+    flingTimer.current = setTimeout(() => {
+      if (direction > 0) {
+        setSeen(true);
+        setDrag(0);
+        setExiting(false);
+      } else void save('unseen');
+    }, 180);
+  }
   return (
-    <Modal
-      title={mode === 'starter' ? 'Build your movie memory' : 'The Friday 20'}
-      onClose={onClose}
-    >
-      {m ? (
+    <Modal title={mode === 'starter' ? 'Your first 50' : 'The Friday 20'} onClose={onClose}>
+      {!batch ? (
+        <div className="review-loading">
+          <Sparkles size={30} />
+          <h2>Finding your next cards…</h2>
+          <p>
+            {s.catalog.configured
+              ? 'Checking your taste and bringing in fresh movies.'
+              : 'Preparing your saved starter library.'}
+          </p>
+        </div>
+      ) : m ? (
         <>
           <div className="review-progress">
             <span>
-              {String(index + 1).padStart(2, '0')} <span>/ {batch.length}</span>
+              {String(done + 1).padStart(2, '0')} <span>/ {batch.movieIds.length}</span>
             </span>
-            <span>{mode === 'starter' ? 'THE STARTER LIBRARY' : 'A LITTLE TASTE CHECK'}</span>
+            <span>
+              {mode === 'starter'
+                ? `${s.onboarding.reviewed}/50 IN YOUR MOVIE MEMORY`
+                : 'PERSONALIZED FOR YOUR GROUP'}
+            </span>
           </div>
           <div className="progress-track">
-            <span style={{ width: `${(index / batch.length) * 100}%` }} />
+            <span style={{ width: `${(done / Math.max(1, batch.movieIds.length)) * 100}%` }} />
           </div>
-          <div
-            className="review-card"
-            onTouchStart={(e) => {
-              startX.current = e.touches[0].clientX;
-            }}
-            onTouchEnd={(e) => {
-              if (startX.current === null) return;
-              const dx = e.changedTouches[0].clientX - startX.current;
-              startX.current = null;
-              if (dx > 70) setSeen(true);
-              else if (dx < -70) save('unseen');
-            }}
-          >
-            <Poster movie={m} large />
-            <div className="review-title">
-              <h2>{m.title}</h2>
-              <span>
-                {m.year} · {m.runtime} min
-              </span>
+          {warning && <p className="review-warning">{warning}</p>}
+          <div className="swipe-stage">
+            <div
+              className={`review-card swipe-card ${exiting ? 'exiting' : ''}`}
+              data-testid="swipe-card"
+              tabIndex={0}
+              aria-label={`${m.title}. Swipe left for unseen, right for seen.`}
+              style={{
+                transform: `translateX(${drag}px) rotate(${drag / 20}deg)`,
+                transition: gesture.current && !exiting ? 'none' : 'transform 180ms ease-out',
+              }}
+              onPointerDown={(e) => {
+                if (saving || seen || exiting || e.button !== 0) return;
+                gesture.current = { x: e.clientX, y: e.clientY, time: performance.now() };
+                e.currentTarget.setPointerCapture(e.pointerId);
+              }}
+              onPointerMove={(e) => {
+                const start = gesture.current;
+                if (!start) return;
+                const dx = e.clientX - start.x,
+                  dy = e.clientY - start.y;
+                if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 15) {
+                  gesture.current = null;
+                  setDrag(0);
+                  return;
+                }
+                setDrag(dx);
+              }}
+              onPointerUp={(e) => {
+                const start = gesture.current;
+                gesture.current = null;
+                if (!start) {
+                  setDrag(0);
+                  return;
+                }
+                const dx = e.clientX - start.x,
+                  dy = e.clientY - start.y,
+                  velocity = Math.abs(dx) / Math.max(1, performance.now() - start.time);
+                if (
+                  Math.abs(dx) > Math.abs(dy) &&
+                  (Math.abs(dx) > 80 || (Math.abs(dx) > 35 && velocity > 0.45))
+                )
+                  swipe(Math.sign(dx));
+                else setDrag(0);
+              }}
+              onPointerCancel={() => {
+                gesture.current = null;
+                setDrag(0);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowLeft') {
+                  e.preventDefault();
+                  swipe(-1);
+                }
+                if (e.key === 'ArrowRight') {
+                  e.preventDefault();
+                  swipe(1);
+                }
+              }}
+            >
+              {Math.abs(drag) > 25 && (
+                <div className={`swipe-stamp ${drag > 0 ? 'seen' : 'unseen'}`} aria-hidden="true">
+                  {drag > 0 ? 'SEEN IT' : 'NEW TO ME'}
+                </div>
+              )}
+              <Poster movie={m} large />
+              <div className="review-title">
+                <h2>{m.title}</h2>
+                <span>
+                  {m.year} · {m.runtime ? `${m.runtime} min` : 'English'}
+                </span>
+              </div>
             </div>
           </div>
           {m.queuedBy.some((q) => q.id !== s.user.id) && (
@@ -1651,28 +1940,41 @@ function Review({
                 <ArrowUpRight size={16} />
               </label>
               <div className="review-actions">
-                <button className="button outline" disabled={saving} onClick={() => save('unseen')}>
+                <button
+                  className="button outline"
+                  disabled={saving || exiting}
+                  onClick={() => swipe(-1)}
+                >
                   <ArrowLeft size={17} />
                   Haven’t seen it
                 </button>
-                <button className="button lime" disabled={saving} onClick={() => setSeen(true)}>
+                <button
+                  className="button lime"
+                  disabled={saving || exiting}
+                  onClick={() => swipe(1)}
+                >
                   Seen it
                   <ArrowRight size={17} />
                 </button>
               </div>
-              <div className="tiny-note">Swipe left for unseen. Right for seen.</div>
+              <div className="tiny-note">
+                Swipe left for unseen. Right for seen. Progress saves automatically.
+              </div>
             </>
           )}
         </>
       ) : (
         <div className="review-complete">
           <span className="complete-star">✳</span>
-          <h2>{batch.length ? 'That’s a wrap.' : 'All caught up.'}</h2>
+          <h2>{batch.movieIds.length ? 'That’s a wrap.' : 'All caught up.'}</h2>
           <p>
-            {batch.length
-              ? `${batch.length} movies. A little more you in the next pick.`
-              : 'Your movie memory is up to date. Add more titles in group settings.'}
+            {batch.movieIds.length
+              ? `${batch.movieIds.length} cards. Your next recommendations already know you better.`
+              : s.catalog.configured
+                ? 'Try Find more movies to bring in another batch.'
+                : 'Connect TMDB to go beyond the starter library.'}
           </p>
+          {warning && <p className="review-warning">{warning}</p>}
           <button className="button lime full" onClick={onClose}>
             Back to the club <ArrowRight size={17} />
           </button>
@@ -1896,7 +2198,12 @@ function SettingsModal({
     <Modal title="Your people. Your little club." onClose={onClose}>
       <div className="settings-content">
         <h2>{s.group.name}</h2>
-        {s.group.demo ? (
+        {s.authMode === 'friends' ? (
+          <div className="info-box">
+            Chris, Matthew, and Yash share this club. Each profile has its own taste, movie memory,
+            and watchlist. Use Switch person below to change profiles.
+          </div>
+        ) : s.group.demo ? (
           <div className="info-box">
             This is an isolated demo with fictional friends and sample ratings. Sign out to create
             your real club.
@@ -1934,6 +2241,26 @@ function SettingsModal({
           {s.movies.length} English-language titles ·{' '}
           {s.movies.filter((m) => m.source === 'imdb-import').length} imported from IMDb
         </p>
+        <div className="catalog-connection">
+          <b>{s.catalog.configured ? 'TMDB connected' : 'Connect your movie universe'}</b>
+          <p>
+            {s.catalog.configured
+              ? 'Official posters, paginated search, and related-film discovery are enabled.'
+              : 'Add TMDB_API_READ_TOKEN securely in environment settings or your server’s .env file. The app never asks for the token in your browser.'}
+          </p>
+          {s.catalog.error && <p className="form-error">{s.catalog.error}</p>}
+          <button
+            className="button outline full"
+            disabled={!s.catalog.configured || importing}
+            onClick={async () => {
+              setImporting(true);
+              await action('/catalog/refresh', { force: true }, 'Movie discovery updated');
+              setImporting(false);
+            }}
+          >
+            Refresh catalog & recommendations
+          </button>
+        </div>
         <div className="info-box">
           The starter library is a curated collection, not IMDb’s current top 100. Export an IMDb
           list as CSV and import up to 100 titles here. Existing seen history stays saved.
@@ -2004,7 +2331,7 @@ function SettingsModal({
         </p>
         <button className="button outline full" onClick={onLogout}>
           <LogOut size={17} />
-          Sign out
+          {s.authMode === 'friends' ? 'Switch person' : 'Sign out'}
         </button>
       </div>
     </Modal>
